@@ -29,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout meet
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout frappe_docker
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: frappe/frappe_docker
           path: frappe_docker
