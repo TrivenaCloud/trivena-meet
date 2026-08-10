@@ -1,0 +1,112 @@
+# Copyright (c) 2026, Frappe and contributors
+# For license information, please see license.txt
+
+import trivena_framework as trivena
+import jwt
+from trivena_framework.tests import IntegrationTestCase
+
+from trivena_meet.api.meeting import get_sfu_connection_details
+
+
+class IntegrationTestMeetingApi(IntegrationTestCase):
+	def setUp(self):
+		trivena.conf.sfu_secret = "test-sfu-secret"
+
+		self.host_email = "host-meet@example.com"
+		self.member_email = "member-meet@example.com"
+		self.outsider_email = "outsider-meet@example.com"
+
+		for email, first_name in (
+			(self.host_email, "Host"),
+			(self.member_email, "Member"),
+			(self.outsider_email, "Outsider"),
+		):
+			self._ensure_user(email, first_name)
+
+		self.meeting = self._create_meeting(self.host_email, meeting_type="restricted")
+
+	def test_member_can_get_sfu_connection_details(self):
+		self.meeting.add_user_to_table("members", self.member_email, save=True, ignore_permissions=True)
+
+		trivena.set_user(self.member_email)
+
+		result = get_sfu_connection_details(self.meeting.name)
+
+		self.assertEqual(result["user_id"], self.member_email)
+		self.assertEqual(result["meeting_id"], self.meeting.name)
+		self.assertTrue(result["auth_token"])
+
+	def test_restricted_meeting_non_member_cannot_get_sfu_connection_details(self):
+		trivena.set_user(self.outsider_email)
+
+		with self.assertRaises(trivena.PermissionError):
+			get_sfu_connection_details(self.meeting.name)
+
+	def test_sfu_token_includes_site_claim(self):
+		"""The SFU JWT must carry the source site so the SFU can namespace rooms
+		across multiple frappe sites sharing one SFU instance."""
+		self.meeting.add_user_to_table("members", self.member_email, save=True, ignore_permissions=True)
+
+		trivena.set_user(self.member_email)
+
+		result = get_sfu_connection_details(self.meeting.name)
+
+		decoded = jwt.decode(
+			result["auth_token"],
+			trivena.conf.sfu_secret,
+			algorithms=["HS256"],
+		)
+
+		self.assertEqual(decoded["site"], trivena.local.site)
+		self.assertEqual(decoded["meeting_id"], self.meeting.name)
+
+	def test_sfu_token_site_claim_keeps_cross_site_meetings_isolated(self):
+		"""Two sites with meetings of the same name must mint tokens that
+		carry different `site` claims so the SFU can route them to distinct
+		rooms."""
+		from trivena_meet.api.meeting import _generate_sfu_token
+
+		token_a = _generate_sfu_token(
+			user_id="user-a",
+			meeting_id="all-hands",
+			site="site-a.example.com",
+		)
+		token_b = _generate_sfu_token(
+			user_id="user-b",
+			meeting_id="all-hands",
+			site="site-b.example.com",
+		)
+
+		decoded_a = jwt.decode(token_a, trivena.conf.sfu_secret, algorithms=["HS256"])
+		decoded_b = jwt.decode(token_b, trivena.conf.sfu_secret, algorithms=["HS256"])
+
+		self.assertEqual(decoded_a["meeting_id"], decoded_b["meeting_id"])
+		self.assertNotEqual(decoded_a["site"], decoded_b["site"])
+
+	def _ensure_user(self, email: str, first_name: str):
+		if trivena.db.exists("User", email):
+			return trivena.get_doc("User", email)
+
+		user = trivena.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": first_name,
+				"enabled": 1,
+				"new_password": "password",
+			}
+		)
+		user.insert(ignore_permissions=True)
+		return user
+
+	def _create_meeting(self, owner: str, meeting_type: str = "open"):
+		trivena.set_user(owner)
+		meeting = trivena.get_doc(
+			{
+				"doctype": "Sae Meeting",
+				"meeting_type": meeting_type,
+				"allow_guest": 1,
+			}
+		)
+		meeting.insert(ignore_permissions=True)
+		return meeting
